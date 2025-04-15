@@ -1384,8 +1384,10 @@ def test_rendering_from_stdin(
     rattler_build: RattlerBuild, recipes: Path, tmp_path: Path
 ):
     text = (recipes / "abi3" / "recipe.yaml").read_text()
-    # variants = recipes / "abi3" / "variants.yaml" "-m", variants
-    rendered = rattler_build("build", "--render-only", input=text, text=True)
+    # variants = recipes / "abi3" / "variants.yaml" "-m", variants (without '--recipe' it will pick up the recipe from root folder)
+    rendered = rattler_build(
+        "build", "--recipe", "-", "--render-only", input=text, text=True
+    )
     loaded = json.loads(rendered)
 
     assert loaded[0]["recipe"]["package"]["name"] == "python-abi3-package-sample"
