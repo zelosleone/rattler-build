@@ -1446,3 +1446,17 @@ def test_ignore_run_exports(rattler_build: RattlerBuild, recipes: Path, tmp_path
     assert rendered_recipe["recipe"]["requirements"]["ignore_run_exports"][
         "from_package"
     ] == [expected_compiler]
+    def test_python_version_spec(
+    rattler_build: RattlerBuild, recipes: Path, tmp_path: Path
+):
+    with pytest.raises(CalledProcessError) as exc_info:
+        args = rattler_build.build_args(recipes / "python-version-spec", tmp_path)
+        rattler_build(*args, stderr=STDOUT)
+
+    error_output = exc_info.value.output.decode("utf-8")
+    assert "invalid python version specification: =.*" in error_output
+    assert (
+        "Use a valid version specification like '3.12', '3.12.*', or '>=3.12'"
+        in error_output
+    )
+
