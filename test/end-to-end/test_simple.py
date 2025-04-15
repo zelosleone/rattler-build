@@ -1459,4 +1459,3 @@ def test_ignore_run_exports(rattler_build: RattlerBuild, recipes: Path, tmp_path
         "Use a valid version specification like '3.12', '3.12.*', or '>=3.12'"
         in error_output
     )
-
