@@ -1446,7 +1446,9 @@ def test_ignore_run_exports(rattler_build: RattlerBuild, recipes: Path, tmp_path
     assert rendered_recipe["recipe"]["requirements"]["ignore_run_exports"][
         "from_package"
     ] == [expected_compiler]
-    def test_python_version_spec(
+
+
+def test_python_version_spec(
     rattler_build: RattlerBuild, recipes: Path, tmp_path: Path
 ):
     with pytest.raises(CalledProcessError) as exc_info:
