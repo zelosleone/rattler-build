@@ -138,9 +138,10 @@ pub(crate) fn apply_patches(
             .current_dir(work_dir)
             .arg("apply")
             .arg(format!("-p{}", strip_level))
-            .arg("--ignore-space-change")
             .arg("--ignore-whitespace")
             .arg("--recount")
+            .arg("--no-index")
+            .arg("--verbose")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -164,12 +165,12 @@ pub(crate) fn apply_patches(
         let output = child_process.wait_with_output().map_err(SourceError::Io)?;
 
         if !output.status.success() {
-            eprintln!(
-                "Failed to apply patch: {}",
-                patch_file_path.to_string_lossy()
+            tracing::error!(
+                "Failed to apply patch: {}\nStdout: {}\nStderr: {}",
+                patch_file_path.to_string_lossy(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
-            eprintln!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-            eprintln!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
             return Err(SourceError::PatchFailed(
                 patch_file_path.to_string_lossy().to_string(),
             ));
