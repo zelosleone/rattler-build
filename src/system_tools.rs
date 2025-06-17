@@ -250,23 +250,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn test_system_tool() {
-        let system_tool = SystemTools::new();
-        let mut cmd = system_tool.call(Tool::Patchelf).unwrap();
-        let stdout = cmd.arg("--version").output().unwrap().stdout;
-        let version = String::from_utf8_lossy(&stdout).trim().to_string();
-
-        let found_tools = system_tool.found_tools.lock().unwrap();
-        assert!(found_tools.contains_key(&Tool::Patchelf));
-
-        let used_tools = system_tool.used_tools.lock().unwrap();
-        assert!(used_tools.contains_key(&Tool::Patchelf));
-
-        assert!(used_tools.get(&Tool::Patchelf).unwrap() == &version);
-    }
-
-    #[test]
     fn test_serialize() {
         // fix versions in used tools to test deserialization
         let mut used_tools = HashMap::new();

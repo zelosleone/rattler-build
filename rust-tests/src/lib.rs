@@ -308,6 +308,15 @@ mod tests {
         format!("h{hash:x}")[..8].to_string()
     }
 
+    fn write_recipe(content: &str) -> PathBuf {
+        let tmp = tmp("recipe");
+        let recipe_dir = tmp.as_dir();
+        fs::create_dir_all(recipe_dir).unwrap();
+        let recipe_path = recipe_dir.join("recipe.yaml");
+        fs::write(&recipe_path, content).unwrap();
+        recipe_path
+    }
+
     #[test]
     fn test_pkg_hash() {
         let tmp = tmp("test_pkg_hash");
@@ -366,20 +375,20 @@ mod tests {
             if f == "paths.json" {
                 let act_arr = actual["paths"].as_array().unwrap();
                 let cmp_arr = cmp["paths"].as_array().unwrap();
-                assert!(act_arr.len() == cmp_arr.len());
+                assert_eq!(act_arr.len(), cmp_arr.len());
                 for (i, p) in act_arr.iter().enumerate() {
                     let c = cmp_arr[i].as_object().unwrap();
                     let p = p.as_object().unwrap();
                     let cpath = PathBuf::from(c["_path"].as_str().unwrap());
                     let ppath = PathBuf::from(p["_path"].as_str().unwrap());
-                    assert!(cpath == ppath);
-                    assert!(c["path_type"] == p["path_type"]);
+                    assert_eq!(cpath, ppath);
+                    assert_eq!(c["path_type"], p["path_type"]);
                     if ppath
                         .components()
                         .any(|s| s.eq(&Component::Normal("dist-info".as_ref())))
                     {
-                        assert!(c["sha256"] == p["sha256"]);
-                        assert!(c["size_in_bytes"] == p["size_in_bytes"]);
+                        assert_eq!(c["sha256"], p["sha256"]);
+                        assert_eq!(c["size_in_bytes"], p["size_in_bytes"]);
                     }
                 }
             } else if actual.ne(&cmp) {
@@ -454,7 +463,7 @@ mod tests {
             None,
         );
 
-        assert!(rattler_build.status.code() == Some(1));
+        assert_eq!(rattler_build.status.code(), Some(1));
     }
 
     #[test]
@@ -476,7 +485,7 @@ mod tests {
             None,
         );
 
-        assert!(rattler_build.status.code().unwrap() == 1);
+        assert_eq!(rattler_build.status.code().unwrap(), 1);
     }
 
     #[test]
@@ -674,5 +683,76 @@ requirements:
     - python
 "#;
         run_build_from_yaml_string(recipe_content.to_string());
+    }
+
+    #[test]
+    fn test_debug_with_recipe() {
+        let recipe = test_data_dir().join("recipes/debug_test/recipe.yaml");
+        let output_dir = tmp("debug_test");
+
+        let output = rattler().with_args([
+            "debug",
+            "--recipe",
+            &recipe.display().to_string(),
+            "--output-dir",
+            &output_dir.as_dir().display().to_string(),
+        ]);
+
+        // Debug command should succeed even if recipe build would fail
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_build_with_variant_config() {
+        let recipe = test_data_dir().join("recipes/recipe_variant/recipe.yaml");
+        let variant_config = test_data_dir().join("recipes/recipe_variant/variants.yaml");
+        let output_dir = tmp("variant_config");
+
+        let output = rattler().build(
+            &recipe,
+            output_dir.as_dir(),
+            Some(&variant_config.display().to_string()),
+            None,
+        );
+
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_build_error_handling_invalid_recipe() {
+        let invalid_recipe = tmp("invalid_recipe");
+        let recipe_dir = invalid_recipe.as_dir();
+        fs::create_dir_all(recipe_dir).unwrap();
+        let recipe_path = recipe_dir.join("recipe.yaml");
+        fs::write(&recipe_path, "invalid: yaml: content:").unwrap();
+        let output_dir = tmp("output");
+
+        let output = rattler().build(&recipe_path, output_dir.as_dir(), None, None);
+
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("error") || stdout.contains("Error"));
+    }
+
+    #[test]
+    fn test_build_error_handling_missing_dependency() {
+        let recipe_content = r#"
+package:
+  name: missing-dep-test
+  version: 1.0.0
+requirements:
+  host:
+    - nonexistent_package_that_does_not_exist
+"#;
+        let temp_recipe = write_recipe(recipe_content);
+        let output_dir = tmp("output");
+
+        let output = rattler().build(&temp_recipe, output_dir.as_dir(), None, None);
+
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("nonexistent_package_that_does_not_exist") || stdout.contains("solve")
+        );
     }
 }

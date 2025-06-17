@@ -15,6 +15,178 @@ use thiserror::Error;
 
 use super::checks::{LinkingCheckError, perform_linking_checks};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_relink_noarch_platform() {
+        // NoArch platform should return an error for is_valid_file
+        // since NoArch doesn't have platform-specific binaries
+        let result = is_valid_file(Platform::NoArch, Path::new("test"));
+        assert!(result.is_err());
+
+        if let Err(e) = result {
+            // Should be UnknownPlatform error
+            assert!(matches!(e, RelinkError::UnknownPlatform));
+        }
+    }
+
+    #[test]
+    fn test_is_valid_file_cross_platform() {
+        // Test that is_valid_file returns appropriate results for different platforms
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.so");
+        fs::write(&test_file, b"not a real binary").unwrap();
+
+        // Linux platform check
+        let result = is_valid_file(Platform::Linux64, &test_file);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // Not a valid ELF file
+
+        // macOS platform check
+        let result = is_valid_file(Platform::Osx64, &test_file);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // Not a valid Mach-O file
+
+        // Windows platform check
+        let result = is_valid_file(Platform::Win64, &test_file);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // Not a valid PE file
+    }
+
+    #[test]
+    fn test_rpath_resolution_complex() {
+        // Test complex RPATH resolution scenarios
+
+        // Mock relinker trait for testing
+        struct MockRelinker {
+            libraries: HashSet<PathBuf>,
+        }
+
+        impl MockRelinker {
+            fn new() -> Self {
+                let mut libraries = HashSet::new();
+                libraries.insert(PathBuf::from("libfoo.so"));
+                libraries.insert(PathBuf::from("/absolute/path/libbar.so"));
+                libraries.insert(PathBuf::from("../relative/libqux.so"));
+                libraries.insert(PathBuf::from("$ORIGIN/../lib/libbaz.so"));
+
+                Self { libraries }
+            }
+        }
+
+        impl Relinker for MockRelinker {
+            fn test_file(_path: &Path) -> Result<bool, RelinkError> {
+                Ok(true)
+            }
+
+            fn new(_path: &Path) -> Result<Self, RelinkError> {
+                Ok(MockRelinker::new())
+            }
+
+            fn libraries(&self) -> HashSet<PathBuf> {
+                self.libraries.clone()
+            }
+
+            fn resolve_libraries(
+                &self,
+                prefix: &Path,
+                encoded_prefix: &Path,
+            ) -> HashMap<PathBuf, Option<PathBuf>> {
+                let mut resolved = HashMap::new();
+
+                for lib in &self.libraries {
+                    if lib.is_absolute() {
+                        // Absolute paths that start with encoded prefix should be resolved
+                        if lib.starts_with(encoded_prefix) {
+                            let relative = lib.strip_prefix(encoded_prefix).unwrap();
+                            resolved.insert(lib.clone(), Some(prefix.join(relative)));
+                        } else {
+                            resolved.insert(lib.clone(), None);
+                        }
+                    } else if lib.to_string_lossy().contains("$ORIGIN") {
+                        // $ORIGIN-based paths need special handling
+                        resolved.insert(lib.clone(), Some(PathBuf::from("resolved/origin/path")));
+                    } else {
+                        // Relative paths
+                        resolved.insert(lib.clone(), Some(prefix.join(lib)));
+                    }
+                }
+
+                resolved
+            }
+
+            fn resolve_rpath(&self, rpath: &Path, prefix: &Path, encoded_prefix: &Path) -> PathBuf {
+                if rpath.starts_with(encoded_prefix) {
+                    let relative = rpath.strip_prefix(encoded_prefix).unwrap();
+                    prefix.join(relative)
+                } else {
+                    rpath.to_path_buf()
+                }
+            }
+
+            fn relink(
+                &self,
+                _prefix: &Path,
+                _encoded_prefix: &Path,
+                _custom_rpaths: &[String],
+                _rpath_allowlist: &GlobVec,
+                _system_tools: &SystemTools,
+            ) -> Result<(), RelinkError> {
+                Ok(())
+            }
+        }
+
+        // Test library resolution
+        let relinker = MockRelinker::new();
+        let prefix = Path::new("/real/prefix");
+        let encoded_prefix = Path::new("/encoded/prefix");
+
+        let resolved = relinker.resolve_libraries(prefix, encoded_prefix);
+
+        // Check that libraries are resolved correctly
+        assert_eq!(resolved.len(), 4);
+        assert!(resolved.get(Path::new("libfoo.so")).unwrap().is_some());
+        assert!(
+            resolved
+                .get(Path::new("/absolute/path/libbar.so"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_relink_wasm32_skip() {
+        // Test that WASM32 architecture is skipped
+        // WASM32 doesn't have a separate platform, it's just checked in the relink function
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.wasm");
+        fs::write(&test_file, b"wasm binary").unwrap();
+
+        // For platforms that are not Linux/macOS/Windows, we get UnknownPlatform
+        let result = is_valid_file(Platform::EmscriptenWasm32, &test_file);
+        assert!(matches!(result, Err(RelinkError::UnknownPlatform)));
+    }
+
+    #[test]
+    fn test_complex_rpath_allowlist() {
+        // Test RPATH allowlist with glob patterns
+        let allowlist =
+            GlobVec::from_vec(vec!["/usr/lib/*", "/opt/*/lib", "*/site-packages/*"], None);
+
+        // Test various paths against the allowlist
+        assert!(allowlist.is_match(Path::new("/usr/lib/libfoo.so")));
+        assert!(allowlist.is_match(Path::new("/opt/cuda/lib")));
+        assert!(allowlist.is_match(Path::new(
+            "/home/user/.local/lib/python3.11/site-packages/numpy"
+        )));
+        assert!(!allowlist.is_match(Path::new("/home/user/random/lib")));
+    }
+}
+
 #[derive(Error, Debug)]
 #[allow(missing_docs)]
 pub enum RelinkError {

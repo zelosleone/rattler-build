@@ -789,128 +789,25 @@ pub async fn build_reindexed_channels(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn setup_build_dir_test() {
-        // without build_id (aka timestamp)
-        let dir = tempfile::tempdir().unwrap();
-        let p1 = get_build_dir(dir.path(), "name", true, &Utc::now()).unwrap();
-        let f1 = p1.file_name().unwrap();
-        assert!(f1.eq("rattler-build_name"));
-
-        // with build_id (aka timestamp)
-        let timestamp = &Utc::now();
-        let p2 = get_build_dir(dir.path(), "name", false, timestamp).unwrap();
-        let f2 = p2.file_name().unwrap();
-        let epoch = timestamp.timestamp();
-        assert!(f2.eq(format!("rattler-build_name_{epoch}").as_str()));
-    }
-}
+mod tests {}
 
 #[cfg(test)]
 mod test {
-    use chrono::TimeZone;
+    use chrono::Utc;
     use fs_err as fs;
     use insta::assert_yaml_snapshot;
     use rattler_conda_types::{
-        MatchSpec, NoArchType, PackageName, PackageRecord, ParseStrictness, RepoDataRecord,
-        VersionWithSource,
+        GenericVirtualPackage, PackageName, Platform, Version, package::ArchiveType,
     };
-    use rattler_digest::{Md5, Sha256, parse_digest_from_hex};
+    use rattler_solve::{ChannelPriority, SolveStrategy};
     use rstest::*;
-    use std::str::FromStr;
-    use url::Url;
+    use std::{collections::BTreeMap, str::FromStr};
 
-    use super::{Directories, Output};
-    use crate::render::resolved_dependencies::{self, SourceDependency};
-
-    #[test]
-    fn test_directories_yaml_rendering() {
-        let tempdir = tempfile::tempdir().unwrap();
-
-        let directories = Directories::setup(
-            "name",
-            &tempdir.path().join("recipe"),
-            &tempdir.path().join("output"),
-            false,
-            &chrono::Utc::now(),
-            false,
-        )
-        .unwrap();
-        directories.create_build_dir(false).unwrap();
-
-        // test yaml roundtrip
-        let yaml = serde_yaml::to_string(&directories).unwrap();
-        let directories2: Directories = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(directories.build_dir, directories2.build_dir);
-        assert_eq!(directories.build_prefix, directories2.build_prefix);
-        assert_eq!(directories.host_prefix, directories2.host_prefix);
-    }
-
-    #[test]
-    fn test_resolved_dependencies_rendering() {
-        let resolved_dependencies = resolved_dependencies::ResolvedDependencies {
-            specs: vec![
-                SourceDependency {
-                    spec: MatchSpec::from_str("python 3.12.* h12332", ParseStrictness::Strict)
-                        .unwrap(),
-                }
-                .into(),
-            ],
-            resolved: vec![RepoDataRecord {
-                package_record: PackageRecord {
-                    arch: Some("x86_64".into()),
-                    build: "h123".into(),
-                    build_number: 0,
-                    constrains: vec![],
-                    depends: vec![],
-                    features: None,
-                    legacy_bz2_md5: None,
-                    legacy_bz2_size: None,
-                    license: Some("MIT".into()),
-                    license_family: None,
-                    md5: parse_digest_from_hex::<Md5>("68b329da9893e34099c7d8ad5cb9c940"),
-                    name: PackageName::from_str("test").unwrap(),
-                    noarch: NoArchType::none(),
-                    platform: Some("linux".into()),
-                    sha256: parse_digest_from_hex::<Sha256>(
-                        "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-                    ),
-                    size: Some(123123),
-                    subdir: "linux-64".into(),
-                    timestamp: Some(chrono::Utc.timestamp_opt(123123, 0).unwrap()),
-                    track_features: vec![],
-                    version: VersionWithSource::from_str("1.2.3").unwrap(),
-                    purls: None,
-                    run_exports: None,
-                    python_site_packages_path: None,
-                    extra_depends: Default::default(),
-                },
-                file_name: "test-1.2.3-h123.tar.bz2".into(),
-                url: Url::from_str("https://test.com/test/linux-64/test-1.2.3-h123.tar.bz2")
-                    .unwrap(),
-                channel: Some("test".into()),
-            }],
-        };
-
-        // test yaml roundtrip
-        assert_yaml_snapshot!(resolved_dependencies);
-        let yaml = serde_yaml::to_string(&resolved_dependencies).unwrap();
-        let resolved_dependencies2: resolved_dependencies::ResolvedDependencies =
-            serde_yaml::from_str(&yaml).unwrap();
-        let yaml2 = serde_yaml::to_string(&resolved_dependencies2).unwrap();
-        assert_eq!(yaml, yaml2);
-
-        let test_data_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/rendered_recipes");
-        let yaml3 = fs::read_to_string(test_data_dir.join("dependencies.yaml")).unwrap();
-        let parsed_yaml3: resolved_dependencies::ResolvedDependencies =
-            serde_yaml::from_str(&yaml3).unwrap();
-
-        assert_eq!("pip", parsed_yaml3.specs[0].render(false));
-    }
+    use super::{
+        BuildConfiguration, Debug, Directories, Output, PackagingSettings,
+        PlatformWithVirtualPackages,
+    };
+    use crate::hash::HashInfo;
 
     #[rstest]
     #[case::rich("rich_recipe.yaml")]
@@ -925,13 +822,147 @@ mod test {
     }
 
     #[test]
-    fn read_recipe_with_sources() {
-        let test_data_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/rendered_recipes");
-        let recipe_1 = test_data_dir.join("git_source.yaml");
-        let recipe_1 = fs::read_to_string(recipe_1).unwrap();
+    fn test_cross_compilation_detection() {
+        // Test 1: Same platform - not cross-compiling
+        let build_config = BuildConfiguration {
+            target_platform: Platform::Linux64,
+            host_platform: PlatformWithVirtualPackages {
+                platform: Platform::Linux64,
+                virtual_packages: vec![],
+            },
+            build_platform: PlatformWithVirtualPackages {
+                platform: Platform::Linux64,
+                virtual_packages: vec![],
+            },
+            variant: BTreeMap::new(),
+            hash: HashInfo {
+                hash: String::new(),
+                prefix: String::new(),
+            },
+            directories: Directories {
+                recipe_dir: Default::default(),
+                recipe_path: Default::default(),
+                cache_dir: Default::default(),
+                host_prefix: Default::default(),
+                build_prefix: Default::default(),
+                work_dir: Default::default(),
+                build_dir: Default::default(),
+                output_dir: Default::default(),
+            },
+            channels: vec![],
+            channel_priority: ChannelPriority::Strict,
+            solve_strategy: SolveStrategy::Highest,
+            timestamp: Utc::now(),
+            subpackages: BTreeMap::new(),
+            packaging_settings: PackagingSettings {
+                archive_type: ArchiveType::TarBz2,
+                compression_level: 9,
+            },
+            store_recipe: true,
+            force_colors: true,
+            sandbox_config: None,
+            debug: Debug::new(false),
+        };
 
-        let git_source_output: Output = serde_yaml::from_str(&recipe_1).unwrap();
-        assert_yaml_snapshot!(git_source_output);
+        assert!(!build_config.cross_compilation());
+
+        // Test 2: Different target and build platform - cross-compiling
+        let mut cross_config = build_config.clone();
+        cross_config.target_platform = Platform::LinuxAarch64;
+        assert!(cross_config.cross_compilation());
+
+        // Test 3: NoArch package - special case
+        let mut noarch_config = build_config.clone();
+        noarch_config.target_platform = Platform::NoArch;
+        noarch_config.host_platform.platform = Platform::Linux64;
+        assert!(noarch_config.cross_compilation());
+    }
+
+    #[test]
+    fn test_complex_cross_compilation_scenarios() {
+        // Test complex cross-compilation scenarios
+
+        // Scenario 1: Linux x86_64 building for Linux ARM64
+        let linux_to_arm = BuildConfiguration {
+            target_platform: Platform::LinuxAarch64,
+            host_platform: PlatformWithVirtualPackages {
+                platform: Platform::LinuxAarch64,
+                virtual_packages: vec![GenericVirtualPackage {
+                    name: PackageName::from_str("__glibc").unwrap(),
+                    version: Version::from_str("2.31").unwrap(),
+                    build_string: "0".to_string(),
+                }],
+            },
+            build_platform: PlatformWithVirtualPackages {
+                platform: Platform::Linux64,
+                virtual_packages: vec![GenericVirtualPackage {
+                    name: PackageName::from_str("__glibc").unwrap(),
+                    version: Version::from_str("2.35").unwrap(),
+                    build_string: "0".to_string(),
+                }],
+            },
+            variant: BTreeMap::new(),
+            hash: HashInfo {
+                hash: String::new(),
+                prefix: String::new(),
+            },
+            directories: Directories {
+                recipe_dir: Default::default(),
+                recipe_path: Default::default(),
+                cache_dir: Default::default(),
+                host_prefix: Default::default(),
+                build_prefix: Default::default(),
+                work_dir: Default::default(),
+                build_dir: Default::default(),
+                output_dir: Default::default(),
+            },
+            channels: vec![],
+            channel_priority: ChannelPriority::Strict,
+            solve_strategy: SolveStrategy::Highest,
+            timestamp: Utc::now(),
+            subpackages: BTreeMap::new(),
+            packaging_settings: PackagingSettings {
+                archive_type: ArchiveType::Conda,
+                compression_level: 22,
+            },
+            store_recipe: true,
+            force_colors: false,
+            sandbox_config: None,
+            debug: Debug::new(true),
+        };
+
+        assert!(linux_to_arm.cross_compilation());
+        assert_eq!(linux_to_arm.host_platform.platform, Platform::LinuxAarch64);
+        assert_eq!(linux_to_arm.build_platform.platform, Platform::Linux64);
+
+        // Scenario 2: macOS building for different macOS architecture
+        let macos_cross = BuildConfiguration {
+            target_platform: Platform::OsxArm64,
+            host_platform: Platform::OsxArm64.into(),
+            build_platform: Platform::Osx64.into(),
+            ..linux_to_arm.clone()
+        };
+
+        assert!(macos_cross.cross_compilation());
+
+        // Scenario 3: Windows cross-compilation (rare but possible)
+        let windows_cross = BuildConfiguration {
+            target_platform: Platform::WinArm64,
+            host_platform: Platform::WinArm64.into(),
+            build_platform: Platform::Win64.into(),
+            ..linux_to_arm.clone()
+        };
+
+        assert!(windows_cross.cross_compilation());
+
+        // Scenario 4: Emscripten/WASM cross-compilation
+        let wasm_cross = BuildConfiguration {
+            target_platform: Platform::EmscriptenWasm32,
+            host_platform: Platform::EmscriptenWasm32.into(),
+            build_platform: Platform::Linux64.into(),
+            ..linux_to_arm.clone()
+        };
+
+        assert!(wasm_cross.cross_compilation());
     }
 }

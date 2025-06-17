@@ -86,3 +86,134 @@ impl miette::SourceCode for Source {
         Ok(Box::new(contents))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_source_from_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.yaml");
+        let content = "name: test\nversion: 1.0.0";
+        fs_err::write(&file_path, content).unwrap();
+
+        let source = Source::from_path(&file_path).unwrap();
+        assert_eq!(source.code.as_ref(), content);
+        assert_eq!(source.path, file_path);
+    }
+
+    #[test]
+    fn test_source_from_rooted_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let sub_dir = root.join("recipes");
+        fs_err::create_dir(&sub_dir).unwrap();
+        let file_path = sub_dir.join("test.yaml");
+        let content = "name: test";
+        fs_err::write(&file_path, content).unwrap();
+
+        let source = Source::from_rooted_path(root, file_path.clone()).unwrap();
+        assert_eq!(source.code.as_ref(), content);
+        assert_eq!(source.path, file_path);
+        assert!(source.name.contains("recipes"));
+        assert!(source.name.contains("test.yaml"));
+    }
+
+    #[test]
+    fn test_source_read_span() {
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5";
+        let source = Source {
+            name: "test.txt".to_string(),
+            code: Arc::from(content),
+            path: PathBuf::from("test.txt"),
+        };
+
+        // Test reading a span
+        let span = SourceSpan::new(7.into(), 6); // "line 2"
+        let result = <Source as miette::SourceCode>::read_span(&source, &span, 1, 1).unwrap();
+
+        assert_eq!(result.name(), Some("test.txt"));
+        // The line() method returns 0-based line number
+        let data_str = std::str::from_utf8(result.data()).unwrap();
+        assert!(data_str.contains("line 2"));
+    }
+
+    #[test]
+    fn test_source_from_path_with_unicode() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("tëst.yaml");
+        let content = "name: tëst\nversion: 1.0.0";
+        fs_err::write(&file_path, content).unwrap();
+
+        let source = Source::from_path(&file_path).unwrap();
+        assert_eq!(source.code.as_ref(), content);
+    }
+
+    #[test]
+    fn test_source_from_path_nonexistent() {
+        let result = Source::from_path(Path::new("/nonexistent/file.yaml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_source_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("empty.yaml");
+        fs_err::write(&file_path, "").unwrap();
+
+        let source = Source::from_path(&file_path).unwrap();
+        assert_eq!(source.code.as_ref(), "");
+    }
+
+    #[test]
+    fn test_source_large_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("large.txt");
+
+        // Create a large file
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        for i in 0..1000 {
+            writeln!(file, "Line {}: This is a test line with some content", i).unwrap();
+        }
+        drop(file);
+
+        let source = Source::from_path(&file_path).unwrap();
+        assert!(source.code.len() > 40000);
+        assert!(source.code.contains("Line 999:"));
+    }
+
+    #[test]
+    fn test_relative_path_handling() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Test with deeply nested path
+        let nested = root.join("a").join("b").join("c");
+        fs_err::create_dir_all(&nested).unwrap();
+        let file_path = nested.join("file.yaml");
+        fs_err::write(&file_path, "test").unwrap();
+
+        let source = Source::from_rooted_path(root, file_path).unwrap();
+        assert!(source.name.contains("a"));
+        assert!(source.name.contains("b"));
+        assert!(source.name.contains("c"));
+        assert!(source.name.contains("file.yaml"));
+    }
+
+    #[test]
+    fn test_absolute_path_outside_root() {
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+
+        let root = temp_dir1.path();
+        let file_path = temp_dir2.path().join("outside.yaml");
+        fs_err::write(&file_path, "test").unwrap();
+
+        let source = Source::from_rooted_path(root, file_path.clone()).unwrap();
+        // When file is outside root, should use filename
+        assert!(source.name.contains("outside.yaml"));
+    }
+}

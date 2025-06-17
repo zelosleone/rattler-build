@@ -1119,3 +1119,251 @@ pub async fn debug_recipe(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod concurrent_tests {
+    use std::{
+        collections::HashSet,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration,
+    };
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_concurrent_file_operations() {
+        // Test concurrent file operations to ensure no race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let shared_path = Arc::new(temp_dir.path().to_path_buf());
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads that create files concurrently
+        for i in 0..10 {
+            let path = shared_path.clone();
+            let results = results.clone();
+
+            let handle = thread::spawn(move || {
+                let file_path = path.join(format!("file_{}.txt", i));
+                let content = format!("Thread {} content", i);
+
+                // Simulate some work
+                thread::sleep(Duration::from_millis(10));
+
+                // Write file
+                fs_err::write(&file_path, &content).unwrap();
+
+                // Record result
+                results.lock().unwrap().push((i, file_path));
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all files were created
+        let results = results.lock().unwrap();
+        assert_eq!(results.len(), 10);
+
+        // Check that all files exist and have correct content
+        for (i, path) in results.iter() {
+            assert!(path.exists());
+            let content = fs_err::read_to_string(path).unwrap();
+            assert_eq!(content, format!("Thread {} content", i));
+        }
+    }
+
+    #[test]
+    fn test_concurrent_cache_access() {
+        use std::collections::BTreeMap;
+
+        // Test concurrent access to shared cache-like structure
+        let cache = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut handles = vec![];
+
+        // Multiple threads reading and writing to cache
+        for i in 0..20 {
+            let cache = cache.clone();
+
+            let handle = thread::spawn(move || {
+                // Alternate between reads and writes
+                if i % 2 == 0 {
+                    // Write operation
+                    let mut cache_guard = cache.lock().unwrap();
+                    cache_guard.insert(format!("key_{}", i), format!("value_{}", i));
+                } else {
+                    // Read operation
+                    let cache_guard = cache.lock().unwrap();
+                    let _value = cache_guard.get(&format!("key_{}", i - 1));
+                    // Simulate some processing
+                    thread::sleep(Duration::from_millis(5));
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for completion
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify cache state
+        let final_cache = cache.lock().unwrap();
+        assert_eq!(final_cache.len(), 10); // Only even numbered keys
+
+        for i in (0..20).step_by(2) {
+            assert_eq!(
+                final_cache.get(&format!("key_{}", i)),
+                Some(&format!("value_{}", i))
+            );
+        }
+    }
+
+    #[test]
+    fn test_concurrent_directory_creation() {
+        // Test concurrent directory creation to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = Arc::new(temp_dir.path().to_path_buf());
+
+        let mut handles = vec![];
+
+        // Multiple threads trying to create overlapping directory structures
+        for i in 0..5 {
+            let path = base_path.clone();
+
+            let handle = thread::spawn(move || {
+                // Create nested directories
+                let dir_path = path
+                    .join("shared")
+                    .join("nested")
+                    .join(format!("thread_{}", i));
+                fs_err::create_dir_all(&dir_path).unwrap();
+
+                // Write a marker file
+                let marker = dir_path.join("marker.txt");
+                fs_err::write(&marker, format!("Thread {}", i)).unwrap();
+
+                dir_path
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut created_dirs = HashSet::new();
+        for handle in handles {
+            let dir = handle.join().unwrap();
+            created_dirs.insert(dir);
+        }
+
+        // Verify all directories were created successfully
+        assert_eq!(created_dirs.len(), 5);
+
+        for dir in created_dirs {
+            assert!(dir.exists());
+            let marker = dir.join("marker.txt");
+            assert!(marker.exists());
+        }
+    }
+
+    #[test]
+    fn test_concurrent_package_resolution() {
+        use std::sync::mpsc;
+
+        // Simulate concurrent package resolution scenarios
+        let (tx, rx) = mpsc::channel();
+        let package_requests = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = vec![];
+
+        // Spawn resolvers
+        for i in 0..3 {
+            let tx = tx.clone();
+            let requests = package_requests.clone();
+
+            let handle = thread::spawn(move || {
+                // Simulate package resolution
+                thread::sleep(Duration::from_millis(50));
+
+                let package = format!("package_{}", i);
+                requests.lock().unwrap().push(package.clone());
+
+                // Send resolution result
+                tx.send((i, package)).unwrap();
+            });
+
+            handles.push(handle);
+        }
+
+        // Drop original sender so receiver knows when all are done
+        drop(tx);
+
+        // Collect results
+        let mut results = Vec::new();
+        for result in rx {
+            results.push(result);
+        }
+
+        // Verify all resolutions completed
+        assert_eq!(results.len(), 3);
+
+        // Check request tracking
+        let final_requests = package_requests.lock().unwrap();
+        assert_eq!(final_requests.len(), 3);
+    }
+
+    #[test]
+    fn test_build_lock_mechanism() {
+        // Test that build locks prevent concurrent builds of same package
+        let temp_dir = TempDir::new().unwrap();
+        let lock_file = temp_dir.path().join("build.lock");
+
+        // Simulate a simple file-based lock
+        struct BuildLock {
+            path: PathBuf,
+        }
+
+        impl BuildLock {
+            fn try_acquire(path: PathBuf) -> Option<Self> {
+                // Try to create lock file exclusively
+                match fs_err::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(_) => Some(BuildLock { path }),
+                    Err(_) => None,
+                }
+            }
+        }
+
+        impl Drop for BuildLock {
+            fn drop(&mut self) {
+                // Clean up lock file
+                let _ = fs_err::remove_file(&self.path);
+            }
+        }
+
+        // First thread acquires lock
+        let lock1 = BuildLock::try_acquire(lock_file.clone());
+        assert!(lock1.is_some());
+
+        // Second thread should fail to acquire
+        let lock2 = BuildLock::try_acquire(lock_file.clone());
+        assert!(lock2.is_none());
+
+        // Drop first lock
+        drop(lock1);
+
+        // Now second thread can acquire
+        let lock3 = BuildLock::try_acquire(lock_file.clone());
+        assert!(lock3.is_some());
+    }
+}

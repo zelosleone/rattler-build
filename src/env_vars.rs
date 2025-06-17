@@ -313,3 +313,52 @@ pub fn vars(output: &Output, build_state: &str) -> HashMap<String, Option<String
 
     vars
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_stdlib_dir() {
+        // Test Windows
+        let prefix = PathBuf::from("C:/prefix");
+        let stdlib = get_stdlib_dir(&prefix, Platform::Win64, "3.9");
+        assert_eq!(stdlib, PathBuf::from("C:/prefix/Lib"));
+
+        // Test Unix
+        let prefix = PathBuf::from("/usr/local");
+        let stdlib = get_stdlib_dir(&prefix, Platform::Linux64, "3.9");
+        assert_eq!(stdlib, PathBuf::from("/usr/local/lib/python3.9"));
+    }
+
+    #[test]
+    fn test_get_sitepackages_dir() {
+        // Test Windows
+        let prefix = PathBuf::from("C:/prefix");
+        let sp = get_sitepackages_dir(&prefix, Platform::Win64, "3.9");
+        assert_eq!(sp, PathBuf::from("C:/prefix/Lib/site-packages"));
+
+        // Test Unix
+        let prefix = PathBuf::from("/usr/local");
+        let sp = get_sitepackages_dir(&prefix, Platform::Linux64, "3.9");
+        assert_eq!(sp, PathBuf::from("/usr/local/lib/python3.9/site-packages"));
+    }
+
+    #[test]
+    fn test_os_vars() {
+        let prefix = PathBuf::from("/usr/local");
+
+        // Test Linux
+        let vars = os_vars(&prefix, &Platform::Linux64);
+        assert_eq!(vars.get("SHLIB_EXT"), Some(&Some(".so".to_string())));
+        assert!(vars.contains_key("CPU_COUNT"));
+
+        // Test macOS
+        let vars = os_vars(&prefix, &Platform::Osx64);
+        assert_eq!(vars.get("SHLIB_EXT"), Some(&Some(".dylib".to_string())));
+
+        // Test Windows
+        let vars = os_vars(&prefix, &Platform::Win64);
+        assert_eq!(vars.get("SHLIB_EXT"), Some(&Some(".dll".to_string())));
+    }
+}

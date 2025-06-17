@@ -240,6 +240,17 @@ impl Files {
 }
 
 impl TempFiles {
+    /// Create TempFiles from an existing TempDir (used for testing)
+    #[cfg(test)]
+    pub fn from_temp_dir(temp_dir: TempDir) -> Result<Self, io::Error> {
+        Ok(TempFiles {
+            files: HashSet::new(),
+            temp_dir,
+            encoded_prefix: PathBuf::from("/opt/conda"),
+            content_type_map: HashMap::new(),
+        })
+    }
+
     /// Add files to the TempFiles struct
     pub fn add_files<I>(&mut self, files: I)
     where

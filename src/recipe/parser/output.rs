@@ -305,4 +305,217 @@ mod tests {
         let src = fs::read_to_string(yaml_file).unwrap();
         assert_debug_snapshot!(find_outputs_from_src(src.as_str()).unwrap());
     }
+
+    #[test]
+    fn test_multi_output_circular_dependencies() {
+        // Test detection of circular dependencies between outputs
+        let recipe_with_circular_deps = r#"
+recipe:
+  name: multi-output-circular
+  version: 1.0.0
+
+outputs:
+  - package:
+      name: output-a
+    requirements:
+      run:
+        - ${{ pin_subpackage('output-b', exact=true) }}
+
+  - package:
+      name: output-b
+    requirements:
+      run:
+        - ${{ pin_subpackage('output-c', exact=true) }}
+
+  - package:
+      name: output-c
+    requirements:
+      run:
+        - ${{ pin_subpackage('output-a', exact=true) }}
+"#;
+
+        // This should parse successfully - circular dep detection happens at build time
+        let result = find_outputs_from_src(recipe_with_circular_deps);
+        if let Err(e) = &result {
+            eprintln!("Error parsing recipe: {:?}", e);
+        }
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 3);
+    }
+
+    #[test]
+    fn test_complex_variant_multi_output() {
+        // Test multi-output with different variant requirements per output
+        let complex_variant_recipe = r#"
+recipe:
+  name: complex-variant-outputs
+  version: 1.0.0
+
+outputs:
+  - package:
+      name: base-{{ python }}
+    requirements:
+      host:
+        - python {{ python }}
+        - numpy {{ numpy }}
+    build:
+      script: echo "Building for Python {{ python }}"
+      skip: python == "3.8"  # Skip Python 3.8 builds
+
+  - package:
+      name: cuda-{{ cuda_version }}
+    requirements:
+      host:
+        - ${{ pin_subpackage('base-' ~ python, exact=true) }}
+        - cudatoolkit {{ cuda_version }}
+      run:
+        - python {{ python }}
+        - cudatoolkit {{ cuda_version }}
+    build:
+      skip: cuda_version == ""  # Skip if no CUDA
+      string: py{{ python }}_cuda{{ cuda_version }}_{{ PKG_BUILDNUM }}
+
+  - package:
+      name: all-variants
+    requirements:
+      run:
+        - ${{ pin_subpackage('base-' ~ python, exact=true) }}
+        - ${{ pin_subpackage('cuda-' ~ cuda_version, exact=true) }}  # if: cuda_version != ""
+"#;
+
+        let result = find_outputs_from_src(complex_variant_recipe);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 3);
+    }
+
+    #[test]
+    fn test_deep_merge_conflicts() {
+        // Test complex deep merging scenarios with conflicts
+        let deep_merge_recipe = r#"
+recipe:
+  name: should-be-overridden
+  version: 1.0.0
+
+build:
+  number: 100
+  script:
+    - echo "Global script"
+  skip: true
+
+about:
+  license: MIT
+  summary: Global summary
+  home: https://example.com
+
+extra:
+  maintainers:
+    - global-maintainer
+  feedstock-name: global-feedstock
+
+outputs:
+  - package:
+      name: output-with-overrides
+      version: 2.0.0
+    build:
+      number: 200
+      script:
+        - echo "Output-specific script"
+      skip: false
+    about:
+      license: Apache-2.0
+      summary: Output-specific summary
+    extra:
+      maintainers:
+        - output-maintainer
+      custom-field: custom-value
+
+  - package:
+      name: output-partial-override
+    build:
+      script:
+        - echo "Another script"
+"#;
+
+        let result = find_outputs_from_src(deep_merge_recipe);
+        assert!(result.is_ok());
+
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 2);
+    }
+
+    #[test]
+    fn test_output_skip_conditions() {
+        // Test complex skip conditions across outputs
+        let skip_conditions_recipe = r#"
+recipe:
+  name: complex-skip-conditions
+  version: 1.0.0
+
+outputs:
+  - package:
+      name: linux-only
+    build:
+      skip: true  # if: not linux
+
+  - package:
+      name: windows-only
+    build:
+      skip: false  # if: not win
+
+  - package:
+      name: python-specific
+    build:
+      skip: false  # if: python != "3.11"
+    requirements:
+      host:
+        - python 3.11
+
+  - package:
+      name: cuda-specific
+    build:
+      skip: true  # if: cuda_compiler_version == ""
+    requirements:
+      build:
+        - ${{ compiler('cuda') }}
+
+  - package:
+      name: complex-skip
+    build:
+      skip: false  # Complex conditions would be evaluated at render time
+"#;
+
+        let result = find_outputs_from_src(skip_conditions_recipe);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 5);
+    }
+
+    #[test]
+    fn test_cache_source_warning() {
+        // Test the warning for cache source configuration
+        let cache_source_recipe = r#"
+recipe:
+  name: cache-source-test
+  version: 1.0.0
+
+source:
+  - url: https://example.com/source.tar.gz
+    sha256: abc123
+
+cache:
+  requirements:
+    build:
+      - python
+
+outputs:
+  - package:
+      name: test-output
+"#;
+
+        // This should parse but potentially warn about source location
+        let result = find_outputs_from_src(cache_source_recipe);
+        assert!(result.is_ok());
+    }
 }
